@@ -1,0 +1,190 @@
+#!/bin/python3
+from optparse import OptionParser
+import socket, random, logging
+import argparse
+import urllib.request
+import datetime
+from influxdb import InfluxDBClient
+import urllib3
+
+DB = 'armor_network_monitor'
+DB_USER = 'armor_network_monitor_user'
+DB_PASSWORD = ''
+DB_HOST = 'localhost'
+DB_PORT='8086'
+
+AMROR_DC = 'DFW'
+
+LOG_FILE = '/var/log/armor_tnc/armor_tnc.log'
+LOG_LEVEL = 'INFO'
+
+SOCKETS = [('get.core.armor.com', 443),
+('api.armor.com', 443),
+('1a.mon.armor.com', 8443),]
+results = []
+timestamp = datetime.datetime.now().isoformat()
+
+
+def configure_logging():
+
+    global logger
+    logger = logging.getLogger()
+    fileHandler = logging.FileHandler(LOG_FILE)
+    logFormatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
+    fileHandler.setFormatter(logFormatter)
+    logger.addHandler(fileHandler)
+    if VERBOSE:
+        logger.setLevel('DEBUG')
+        configure_verbose()
+    else:
+        logger.setLevel(LOG_LEVEL)
+
+def configure_verbose():
+
+    global logger
+    logFormatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
+    console_output = logging.StreamHandler()
+    console_output.setFormatter(logFormatter)
+    logger.addHandler(console_output)
+
+def socket_test(sockett,source):
+
+    s = socket.socket()
+    s.settimeout(5)
+    s.bind((source, random.randint(32768, 60999)))
+    try:
+        s.connect(sockett)
+        s.close()
+        return True
+    except:
+        s.close()
+        return False
+
+def print_results(results):
+
+    print('{0:<25}{1:<10}{2:<12}'.format('Host','With NAT','Without NAT'))
+    for i in results:
+        if i[1] == 'With NAT':
+            pass
+        elif i[1] == True:
+            i[1] = 'Success'
+        else:
+            i[1] = 'Failure'
+        if i[2] == 'Without NAT':
+            pass
+        elif i[2] == True:
+            i[2] = 'Success'
+        else:
+            i[2] = 'Failure'
+
+        print('{0:<25}{1:<10}{2:<12}'.format(i[0],i[1],i[2]))
+    print()
+
+def prepare_json(results):
+
+    data = []
+    for i in results:
+        if i[1]:
+            i[1] = 1
+        else:
+            i[1] = 0
+        if i[2]:
+            i[2] = 1
+        else:
+            i[2] = 0
+
+        record = [{
+        "measurement": "tcp_connect",
+        "tags": {
+            "datacentre": AMROR_DC,
+            "domain": i[0],
+            "nat": "true"
+        },
+        "time": timestamp,
+        "fields": {
+            "Success": i[1]
+        }
+        },
+        {
+        "measurement": "tcp_connect",
+        "tags": {
+            "datacentre": AMROR_DC,
+            "domain": i[0],
+            "nat": "false"
+        },
+        "time": timestamp,
+        "fields": {
+            "Success": i[2]
+        }}]
+        data += record
+    return data
+
+def return_public(sourceip):
+
+    logger.info('Resolving source IP for %s' % sourceip)
+    sourceip = sourceip
+    true_socket = socket.socket
+    try:
+        def bound_socket(*a, **k):
+            sock = true_socket(*a, **k)
+            sock.bind((sourceip, 0))
+            return sock
+        socket.socket = bound_socket
+        result = urllib.request.urlopen('https://ident.me').read().decode('utf8')
+    except Exception as error:
+        logger.critical(error)
+        result = 'NA'
+    logger.info('Source IP: %s' % result)
+    socket.socket = true_socket
+    return result
+
+def write_db(db_data):
+
+    logger.info('Writing results to DB')
+    logger.debug('Results: %s' % db_data)
+    try:
+        client = InfluxDBClient(host=DB_HOST, port=DB_PORT, username=DB_USER, password=DB_PASSWORD, ssl=True, verify_ssl=False)
+        client.switch_database(DB)
+        client.write_points(db_data)
+    except Exception as error:
+        logger.critical(error)
+
+def log_results(results):
+
+    for i in results:
+        logger.info('TEST RESULT: {0:<25} : WITH NAT: {1}\t WITHOUT NAT: {2}'.format(i[0], i[1], i[2]))
+
+if __name__ == '__main__':
+    global VERBOSE
+
+    urllib3.disable_warnings()
+    parser = argparse.ArgumentParser(description='Check connectivity to Armor hosts via a NAT\'d IP and non NAT IP')
+    parser.add_argument('NATIP', metavar='NAT', type=str, nargs=1, help='IP address that has a public NAT')
+    parser.add_argument('NONATIP', metavar='NONAT', type=str, nargs=1, help='IP address without public NAT')
+    parser.add_argument('-t', '--text', action='store_true', help='text output of result to stdout')
+    parser.add_argument('-d', '--database', action='store_true', help='write results to database')
+    parser.add_argument('-v', '--verbose', action='store_true', help='verbose logging to stdout')
+    args = parser.parse_args()
+    VERBOSE = args.verbose
+    configure_logging()
+
+    for i in SOCKETS:
+        nat_res = socket_test(i,args.NATIP[0])
+        nonat_res =  socket_test(i,args.NONATIP[0])
+        results.append(['{0}:{1}'.format(i[0],i[1]),nat_res,nonat_res])
+
+    logging.info('NATIP   : {0}'.format(args.NATIP[0]))
+    nat_public = return_public(args.NATIP[0])
+    logging.info('NONATIP : {0}'.format(args.NONATIP[0]))
+    nonat_public = return_public(args.NONATIP[0])
+    db_data = prepare_json(results)
+
+    log_results(results)
+
+    if args.text:
+        print('\nNATted IP: {0}, public address: {1}'.format(args.NATIP[0],nat_public))
+        print('No NAT IP: {0}, public address: {1}\n'.format(args.NONATIP[0],nonat_public))
+        print_results(results)
+    if args.database:
+        write_db(db_data)
+
