@@ -136,8 +136,8 @@ def write_db(db_data):
         org = DB_CONFIG.get('db_org')
         client = InfluxDBClient(url=url, token=token, org=org)
         write_api = client.write_api()
-        write_api.write(CONFIG.get('db_bucket'),CONFIG.get('db_org'), db_data)
-
+        write_api.write(DB_CONFIG.get('db_bucket'),DB_CONFIG.get('db_org'), db_data)
+        write_api.close()
     except Exception as error:
         logger.critical(error)
 
@@ -153,11 +153,13 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--database', action='store_true', help='write results to database')
     parser.add_argument('-v', '--verbose', action='store_true', help='verbose logging to stdout')
     args = parser.parse_args()
+    if not args.text and not args.database:
+        sys.exit('\nno option provided, see --help for available options\n')
+
     VERBOSE = args.verbose
     configure_logging()
 
     perform_tests()
-    print(prepare_json(results))
     log_results(results)    
     if args.text:
         print_results(results)
