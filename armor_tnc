@@ -1,10 +1,13 @@
 #!/bin/python3
 from optparse import OptionParser
 import socket, random, logging, os, sys
+from multiprocessing import Process, Manager
+from time import time, sleep
 import argparse
 import urllib.request
 import datetime
 import yaml
+import logging.handlers
 
 import traceback
 from influxdb_client import InfluxDBClient
@@ -29,10 +32,10 @@ def configure_logging():
 
     global logger
     logger = logging.getLogger()
-    fileHandler = logging.FileHandler(CONFIG.get('log_file'))
-    logFormatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
-    fileHandler.setFormatter(logFormatter)
-    logger.addHandler(fileHandler)
+    handler = logging.handlers.SysLogHandler(facility=logging.handlers.SysLogHandler.LOG_DAEMON, address='/dev/log')
+    logFormatter = logging.Formatter('AMOR TNC | %(asctime)s | %(levelname)s | %(name)s | %(message)s')
+    handler.setFormatter(logFormatter)
+    logger.addHandler(handler)
     if VERBOSE:
         logger.setLevel('DEBUG')
         configure_verbose()
@@ -47,63 +50,74 @@ def configure_verbose():
     console_output.setFormatter(logFormatter)
     logger.addHandler(console_output)
 
-def socket_test(sockett,source):
-
+def socket_test(conn_details, results):
     s = socket.socket()
+    s.bind((conn_details['address'], 0))
     s.settimeout(2)
-    s.bind((source, random.randint(32768, 60999)))
     try:
-        s.connect(sockett)
+        s.connect((conn_details['domain'],conn_details['port']))
         s.close()
-        return True
+        conn_details['result'] = 1
     except:
+        conn_details['result'] = 0
         s.close()
-        return False
+    results.append(conn_details)
+    return
 
 def perform_tests():
-    for x in CONFIG.get('source_ips'):
-        x['public'] = return_public(x['address'])
-        result_set = {}
-        for i in CONFIG.get('sockets'):
-            remote_socket = '{0}:{1}'.format(i['domain'],i['port'])
-            result_set[remote_socket] = socket_test((i['domain'],i['port']),x['address'])
-        source_results = { 'alias' : x['alias'], 'source_address' : x['address'], 'public_address' : x['public'], 'results' : result_set}
-        results.append(source_results)
+    global results
+    with Manager() as manager:
+        start = time()
+        results_manager = manager.list()
+        jobs = []
+
+        for x in CONFIG.get('source_ips'):
+            x['public_address'] = return_public(x['address'])
+            result_set = {}
+            for i in CONFIG.get('sockets'):
+                x['domain'] = i['domain']
+                x['port'] = i['port']
+                p = Process(target=socket_test, args=(x,results_manager))
+                p.start()
+                jobs.append(p)
+        for p in jobs:
+            p.join(timeout=8)
+            end = time()
+        results += results_manager
 
 def print_results(results):
 
     print('\nHost: {}\n'.format(host))
-    print('{0:<15}{1:<15}{2:<15}{3}'.format('Source IP','Address Type','Public IP','Connectivity Results'))
+    print('{0:<15}{1:<15}{2:<15}{3:<25}{4:<10}{5}'.format('Source IP','Address Type','Public IP','Domain', 'Port', 'Connectivity Result'))
     for i in results:
         
-        print('{0:<15}{1:<15}{2:<15}{3}'.format(i['source_address'],i['alias'],i['public_address'],i['results']))
+        print('{0:<15}{1:<15}{2:<15}{3:<25}{4:<10}{5}'.format(i['address'],i['alias'],i['public_address'],i['domain'],i['port'],i['result']))
     print()
 
 def log_results(results):
 
     for i in results:
-        logger.info('TEST RESULTS: HOST: {4:<5} Src: {0:<15} Type: {1:<8} Pub: {2:<15} Results: {3}'.format(i['source_address'],i['alias'],i['public_address'],i['results'], host))
+        logger.info('TEST RESULTS: HOST: {6:<5} Src: {0:<15} Type: {1:<8} Pub: {2:<15} Domain: {3:<25} Port: {4:<10} Result: {5}'.format(i['address'],i['alias'],i['public_address'],i['domain'],i['port'],i['result'], host))
 
 def prepare_json(results):
 
     data = []
     for i in results:
-        for key, val in i['results'].items():
-            record = {
-            "measurement": "tcp_connect",
-            "tags": {
-                "host": host,
-                "domain": key,
-                "addr_type": i['alias'],
-                "source_ip": i['source_address'],
-                "public_ip": i['public_address'],
-                },
-            "time": timestamp,
-            "fields": {
-                "Success": int(val),
-                },
-            }
-            data.append(record)
+        record = {
+        "measurement": "tcp_connect",
+        "tags": {
+            "host": host,
+            "domain": i['domain'],
+            "addr_type": i['alias'],
+            "source_ip": i['address'],
+            "public_ip": i['public_address'],
+            },
+        "time": timestamp,
+        "fields": {
+            "Success": int(i['result']),
+            },
+        }
+        data.append(record)
     return data
 
 def return_public(sourceip):
@@ -163,7 +177,6 @@ if __name__ == '__main__':
     log_results(results)    
     if args.text:
         print_results(results)
-
     if args.database:
         db_data = prepare_json(results)
         write_db(db_data)
