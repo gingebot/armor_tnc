@@ -107,7 +107,7 @@ def prepare_json(results):
         "measurement": "tcp_connect",
         "tags": {
             "host": host,
-            "domain": i['domain'],
+            "domain": '{0}:{1}'.format(i['domain'],i['port']),
             "addr_type": i['alias'],
             "source_ip": i['address'],
             "public_ip": i['public_address'],
